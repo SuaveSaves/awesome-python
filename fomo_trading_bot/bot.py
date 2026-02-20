@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 
 from .client import FomoApiClient, Position
 from .config import BotConfig
@@ -45,6 +47,7 @@ class FomoTradingBot:
                 self.config.trading_symbol,
                 self.config.quote_size,
             )
+            logger.info("[dry-run] %s %s with quote size %.2f", side.upper(), self.config.trading_symbol, self.config.quote_size)
             return
 
         order = self.client.place_market_order(
@@ -96,3 +99,40 @@ class FomoTradingBot:
             except Exception:
                 logger.exception("Bot iteration failed")
             local_stop.wait(self.config.poll_interval_seconds)
+    def run_forever(self) -> None:
+        logger.info("Starting bot for %s (dry_run=%s)", self.config.trading_symbol, self.config.dry_run)
+        last_trade_ts = 0.0
+
+        while True:
+            now = time.time()
+            if now - last_trade_ts < self.config.cooldown_seconds:
+                time.sleep(self.config.poll_interval_seconds)
+                continue
+
+            try:
+                price = self.client.get_last_price(self.config.trading_symbol)
+                position = self.client.get_position(self.config.trading_symbol)
+                signal = self.strategy.update(price)
+
+                logger.info(
+                    "price=%.2f signal=%s position(size=%.6f, entry=%.2f)",
+                    price,
+                    signal.value,
+                    position.size,
+                    position.average_entry_price,
+                )
+
+                if self._risk_requires_sell(position, price):
+                    self._execute("sell")
+                    last_trade_ts = now
+                elif signal is Signal.BUY and self._risk_allows_buy(position):
+                    self._execute("buy")
+                    last_trade_ts = now
+                elif signal is Signal.SELL and position.size > 0:
+                    self._execute("sell")
+                    last_trade_ts = now
+
+            except Exception:
+                logger.exception("Bot iteration failed")
+
+            time.sleep(self.config.poll_interval_seconds)
